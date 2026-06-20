@@ -1,20 +1,21 @@
 //! Persisting matches for posterity.
 //!
 //! Each game gets its own directory under a base (default `games/`). Every move
-//! is one text file whose name encodes *when* (round), *who* (seat + player),
-//! and *what* (the move); the file body is that model's full reply for the
-//! round. A `summary.txt` records the move table and final score. Files are
+//! is one text file whose name encodes *when* (round) and *who* (seat +
+//! player); the file body is that model's full reply for the round. The move
+//! itself is deliberately *not* in the filename — it may not parse — so the
+//! moves live only in `summary.txt`, alongside the final score. Files are
 //! written as each round completes, so a match that stops early still leaves a
 //! complete record of what was played.
 //!
 //! Example layout:
 //! ```text
 //! games/1718900000_anthropic-claude-opus-4-8_vs_gemini-2.5-flash/
-//!   r001_A_anthropic-claude-opus-4-8_rock.txt
-//!   r001_B_gemini-2.5-flash_paper.txt
-//!   r002_A_anthropic-claude-opus-4-8_scissors.txt
+//!   r001_A_anthropic-claude-opus-4-8.txt        # body = that model's round-1 reply
+//!   r001_B_gemini-2.5-flash.txt
+//!   r002_A_anthropic-claude-opus-4-8.txt
 //!   ...
-//!   summary.txt
+//!   summary.txt                                 # move table + final score
 //! ```
 
 use std::fs;
@@ -71,16 +72,10 @@ impl Recorder {
         &self.dir
     }
 
-    /// Write both players' moves for one completed round.
+    /// Write both players' replies for one completed round.
     pub fn record(&self, r: &RoundReport) -> io::Result<()> {
-        self.write_move("A", &self.label_a, r.number, r.move_a, r.note_a.as_deref())?;
-        self.write_move("B", &self.label_b, r.number, r.move_b, r.note_b.as_deref())?;
-        let outcome_b = match r.outcome_a {
-            Outcome::Win => Outcome::Loss,
-            Outcome::Loss => Outcome::Win,
-            Outcome::Draw => Outcome::Draw,
-        };
-        let _ = outcome_b; // outcome is derivable; kept for clarity
+        self.write_reply("A", &self.label_a, r.number, r.note_a.as_deref())?;
+        self.write_reply("B", &self.label_b, r.number, r.note_b.as_deref())?;
         self.played.lock().unwrap().push(Played {
             a: r.move_a,
             b: r.move_b,
@@ -89,15 +84,14 @@ impl Recorder {
         Ok(())
     }
 
-    fn write_move(
+    fn write_reply(
         &self,
         seat: &str,
         label: &str,
         round: usize,
-        mv: Move,
         note: Option<&str>,
     ) -> io::Result<()> {
-        let name = format!("r{round:03}_{seat}_{}_{}.txt", sanitize(label), mv.as_str());
+        let name = format!("r{round:03}_{seat}_{}.txt", sanitize(label));
         let body = note.unwrap_or("(no commentary)");
         fs::write(self.dir.join(name), format!("{body}\n"))
     }

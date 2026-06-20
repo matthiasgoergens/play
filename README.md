@@ -100,15 +100,17 @@ deterministic `counter`-vs-`fixed` match.
 
 Every match is saved for posterity (both the CLI and the viewer do this). Each
 game gets its own directory under `games/`, with **one text file per move** —
-the filename says when/who/what, the body is that model's full reply:
+the filename says when (round) and who (seat + player), the body is that model's
+full reply. The move is *not* in the filename (it might not parse); moves live in
+`summary.txt`:
 
 ```
 games/1718900000_anthropic-claude-opus-4-8_vs_gemini-2.5-flash/
-  r001_A_anthropic-claude-opus-4-8_rock.txt     # body = Claude's round-1 message
-  r001_B_gemini-2.5-flash_paper.txt             # body = Gemini's round-1 message
-  r002_A_anthropic-claude-opus-4-8_scissors.txt
+  r001_A_anthropic-claude-opus-4-8.txt     # body = Claude's round-1 message
+  r001_B_gemini-2.5-flash.txt              # body = Gemini's round-1 message
+  r002_A_anthropic-claude-opus-4-8.txt
   ...
-  summary.txt                                   # move table + final score
+  summary.txt                              # move table + final score
 ```
 
 CLI flags: `--games-dir <path>` (default `games`), `--no-record` to skip.

@@ -1,8 +1,10 @@
 //! LLM-backed players. Each adapter holds its *own* running conversation, so a
-//! model's commentary builds across rounds — its developing read of the
-//! opponent is the whole point. Only moves are relayed between the two models
-//! (never each other's reasoning), so any psychoanalysis is inferred from play
-//! alone, exactly like the manual prototype.
+//! model's commentary builds across rounds. Only moves are relayed between the
+//! two models (never each other's words), exactly like the manual prototype.
+//!
+//! The prompting is deliberately minimal — a mediator framing and nothing more.
+//! The models were never asked to explain themselves; that they do is the fun
+//! part, so we don't manufacture it.
 //!
 //! No official Anthropic/Google SDK exists for Rust, so these talk raw HTTP via
 //! `reqwest`. API keys are read from the environment; nothing is hard-coded.
@@ -12,17 +14,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Mutex;
 
-use crate::game::{Move, Outcome, PlayerView};
+use crate::game::{Move, PlayerView};
 use crate::player::{Decision, Player};
-
-/// Deliberately light-touch framing: it tells each model the opponent is another
-/// AI and invites it to think out loud, but never instructs it to "analyze" or
-/// "win". The interesting behaviour emerges on its own.
-const SYSTEM: &str = "You're an AI language model playing an iterated game of \
-rock-paper-scissors against another AI language model. Think out loud as you \
-play — share whatever you're noticing or reasoning about. End every message \
-with your move on its own final line: just the single word rock, paper, or \
-scissors.";
 
 #[derive(Clone, Copy)]
 enum Role {
@@ -30,43 +23,37 @@ enum Role {
     Assistant,
 }
 
-/// The per-round user message. The model remembers the rest of the match in its
-/// own conversation, so each turn only states the latest result.
-fn round_user_message(view: &PlayerView) -> String {
-    match view.history.last() {
-        None => format!(
-            "Let's play {n} rounds of rock-paper-scissors, head to head. Each round \
-             we both reveal at the same time. This is round 1 of {n}. Make your move.",
-            n = view.total_rounds
-        ),
-        Some(last) => {
-            let result = match last.outcome {
-                Outcome::Win => "you won",
-                Outcome::Loss => "you lost",
-                Outcome::Draw => "it was a draw",
-            };
-            format!(
-                "Round {prev} result: you threw {mine}, your opponent threw {theirs} \
-                 — {result}. On to round {cur} of {total}. Your move.",
-                prev = view.round_number - 1,
-                cur = view.round_number,
-                total = view.total_rounds,
-                mine = last.mine,
-                theirs = last.theirs,
-            )
-        }
+/// A friendly name for the opponent, as a human mediator would say it
+/// ("...between you and Claude"), derived from the opponent's player spec.
+fn friendly(name: &str) -> &str {
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("anthropic") || lower.starts_with("claude") {
+        "Claude"
+    } else if lower.starts_with("gemini") || lower.starts_with("google") {
+        "Gemini"
+    } else {
+        name
     }
 }
 
-/// Parse a move from free-form model text, preferring the last keyword (we ask
-/// the model to put its decision on the final line).
-fn parse_last_move(text: &str) -> anyhow::Result<Move> {
-    if let Some(line) = text.lines().rev().find(|l| !l.trim().is_empty()) {
-        if let Some(mv) = Move::parse(line) {
-            return Ok(mv);
-        }
+/// The per-round user message, in a mediator's voice. The model remembers the
+/// match in its own conversation, so each turn only relays the opponent's last
+/// move — not the outcome, which the model can work out itself.
+fn round_user_message(view: &PlayerView) -> String {
+    let opp = friendly(&view.opponent_name);
+    match view.history.last() {
+        None => format!(
+            "I'm mediating a game of rock / scissors / paper between you and {opp}. \
+             What's your first move?"
+        ),
+        Some(last) => format!("{opp} played {}. What's your next move?", last.theirs),
     }
-    Move::parse(text).ok_or_else(|| anyhow!("could not find a move in model output: {text:?}"))
+}
+
+/// Pull the chosen move out of a free-form reply (last move mentioned wins).
+fn parse_reply(text: &str) -> anyhow::Result<Move> {
+    Move::parse_decision(text)
+        .ok_or_else(|| anyhow!("could not find a move in model output: {text:?}"))
 }
 
 /// Push a user turn and return a snapshot of the whole conversation, without
@@ -123,7 +110,6 @@ impl AnthropicPlayer {
         let body = json!({
             "model": self.model,
             "max_tokens": 1024,
-            "system": SYSTEM,
             "messages": messages,
         });
 
@@ -167,7 +153,7 @@ impl Player for AnthropicPlayer {
     async fn decide(&self, view: &PlayerView) -> anyhow::Result<Decision> {
         let snapshot = push_user(&self.convo, round_user_message(view));
         let text = self.complete(&snapshot).await?;
-        let mv = parse_last_move(&text)?;
+        let mv = parse_reply(&text)?;
         push_assistant(&self.convo, text.clone());
         Ok(Decision { mv, note: Some(text) })
     }
@@ -215,7 +201,6 @@ impl GeminiPlayer {
             self.model
         );
         let body = json!({
-            "system_instruction": { "parts": [{ "text": SYSTEM }] },
             "contents": contents,
             "generationConfig": { "maxOutputTokens": 1024 }
         });
@@ -258,7 +243,7 @@ impl Player for GeminiPlayer {
     async fn decide(&self, view: &PlayerView) -> anyhow::Result<Decision> {
         let snapshot = push_user(&self.convo, round_user_message(view));
         let text = self.complete(&snapshot).await?;
-        let mv = parse_last_move(&text)?;
+        let mv = parse_reply(&text)?;
         push_assistant(&self.convo, text.clone());
         Ok(Decision { mv, note: Some(text) })
     }
@@ -270,27 +255,29 @@ mod tests {
     use crate::game::{MatchState, Round, Seat};
 
     #[test]
-    fn parse_last_move_prefers_final_line() {
-        let text = "I considered rock and paper.\nscissors";
-        assert_eq!(parse_last_move(text).unwrap(), Move::Scissors);
+    fn parse_reply_takes_the_decision() {
+        let text = "Claude opened with rock, so I'll answer with paper.";
+        assert_eq!(parse_reply(text).unwrap(), Move::Paper);
     }
 
     #[test]
-    fn first_round_message_is_an_invitation() {
-        let state = MatchState::new("me", "you", 5);
+    fn first_message_is_the_mediator_framing() {
+        let state = MatchState::new("me", "gemini:flash", 5);
         let msg = round_user_message(&state.view_for(Seat::A));
-        assert!(msg.contains("round 1 of 5"));
-        assert!(msg.contains("Make your move"));
+        assert!(msg.contains("between you and Gemini"));
+        assert!(msg.contains("first move"));
+        // No round count and no "end with your move" coaching.
+        assert!(!msg.contains("round 1"));
     }
 
     #[test]
-    fn later_round_message_reports_last_result() {
-        let mut state = MatchState::new("me", "you", 5);
+    fn later_message_relays_opponent_move_only() {
+        let mut state = MatchState::new("me", "anthropic:claude-opus-4-8", 5);
         state.rounds.push(Round { a: Move::Rock, b: Move::Scissors });
         let msg = round_user_message(&state.view_for(Seat::A));
-        assert!(msg.contains("you threw rock"));
-        assert!(msg.contains("opponent threw scissors"));
-        assert!(msg.contains("you won"));
-        assert!(msg.contains("round 2 of 5"));
+        assert!(msg.contains("Claude played scissors"));
+        assert!(msg.contains("next move"));
+        // We don't tell them whether they won.
+        assert!(!msg.to_lowercase().contains("you won"));
     }
 }

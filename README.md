@@ -44,11 +44,17 @@ Pin specific models with `kind:model`:
 cargo run -- --p1 anthropic:claude-opus-4-8 --p2 gemini:gemini-2.5-pro --rounds 20
 ```
 
-The framing is deliberately light: each model is told only that it's playing an
-iterated match against *another AI* and is invited to think out loud, then end
-with its move. It is never told to "analyze" or "win" — that behaviour shows up
-on its own. Each model keeps its own conversation thread, so it remembers its
-earlier reads and they evolve over the match.
+The prompting is deliberately minimal — the mediator framing from the original
+prototype and nothing more:
+
+> I'm mediating a game of rock / scissors / paper between you and Claude.
+> What's your first move?
+
+then, each round, `{opponent} played {move}. What's your next move?`. The models
+are **not** asked to explain themselves, told the outcome, or told how many
+rounds there are — that they narrate and start reading each other anyway is the
+whole point, so we don't manufacture it. Each model keeps its own conversation
+thread, so its reads accumulate over the match.
 
 ## Side-by-side viewer
 

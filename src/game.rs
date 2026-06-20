@@ -63,6 +63,27 @@ impl Move {
         }
         best.map(|(_, mv)| mv)
     }
+
+    /// Like [`Move::parse`] but takes the *last* keyword mentioned. With
+    /// unstructured prose a model's decision lands at the end ("...so I'll go
+    /// paper"), often after restating the opponent's move — so the last mention
+    /// is the better guess at what it actually chose.
+    pub fn parse_decision(s: &str) -> Option<Move> {
+        let lower = s.to_lowercase();
+        let mut best: Option<(usize, Move)> = None;
+        for (kw, mv) in [
+            ("rock", Move::Rock),
+            ("paper", Move::Paper),
+            ("scissors", Move::Scissors),
+        ] {
+            if let Some(idx) = lower.rfind(kw) {
+                if best.map_or(true, |(b, _)| idx > b) {
+                    best = Some((idx, mv));
+                }
+            }
+        }
+        best.map(|(_, mv)| mv)
+    }
 }
 
 impl fmt::Display for Move {
@@ -229,6 +250,17 @@ mod tests {
         // Earliest keyword wins when several appear.
         assert_eq!(Move::parse("not paper, rock"), Some(Move::Paper));
         assert_eq!(Move::parse("lizard"), None);
+    }
+
+    #[test]
+    fn parse_decision_takes_the_last_mention() {
+        // Opponent's move stated first, the model's own choice last.
+        assert_eq!(
+            Move::parse_decision("Claude played rock, so I'll go with paper"),
+            Some(Move::Paper)
+        );
+        assert_eq!(Move::parse_decision("scissors"), Some(Move::Scissors));
+        assert_eq!(Move::parse_decision("lizard"), None);
     }
 
     #[test]

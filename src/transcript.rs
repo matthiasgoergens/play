@@ -25,7 +25,6 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::game::{Move, Outcome};
-use crate::referee::RoundReport;
 
 /// Keep filenames filesystem-safe and readable.
 fn sanitize(s: &str) -> String {
@@ -72,28 +71,23 @@ impl Recorder {
         &self.dir
     }
 
-    /// Write both players' replies for one completed round.
-    pub fn record(&self, r: &RoundReport) -> io::Result<()> {
-        self.write_reply("A", &self.label_a, r.number, r.note_a.as_deref())?;
-        self.write_reply("B", &self.label_b, r.number, r.note_b.as_deref())?;
-        self.played.lock().unwrap().push(Played {
-            a: r.move_a,
-            b: r.move_b,
-            outcome_a: r.outcome_a,
-        });
-        Ok(())
-    }
-
-    fn write_reply(
+    /// Persist one player's raw reply for a round. Called *before* any move is
+    /// parsed, so an unparseable reply is still saved.
+    pub fn reply(
         &self,
+        round: usize,
         seat: &str,
         label: &str,
-        round: usize,
-        note: Option<&str>,
+        text: Option<&str>,
     ) -> io::Result<()> {
         let name = format!("r{round:03}_{seat}_{}.txt", sanitize(label));
-        let body = note.unwrap_or("(no commentary)");
+        let body = text.unwrap_or("(no commentary)");
         fs::write(self.dir.join(name), format!("{body}\n"))
+    }
+
+    /// Record a completed round's moves for the `summary.txt` table.
+    pub fn round_played(&self, a: Move, b: Move, outcome_a: Outcome) {
+        self.played.lock().unwrap().push(Played { a, b, outcome_a });
     }
 
     /// Write `summary.txt`. `stopped` is `Some(reason)` if the match ended early.

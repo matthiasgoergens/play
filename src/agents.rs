@@ -50,12 +50,6 @@ fn round_user_message(view: &PlayerView) -> String {
     }
 }
 
-/// Pull the chosen move out of a free-form reply (last move mentioned wins).
-fn parse_reply(text: &str) -> anyhow::Result<Move> {
-    Move::parse_decision(text)
-        .ok_or_else(|| anyhow!("could not find a move in model output: {text:?}"))
-}
-
 /// Push a user turn and return a snapshot of the whole conversation, without
 /// holding the lock across the network call.
 fn push_user(convo: &Mutex<Vec<(Role, String)>>, text: String) -> Vec<(Role, String)> {
@@ -151,11 +145,12 @@ impl Player for AnthropicPlayer {
     }
 
     async fn decide(&self, view: &PlayerView) -> anyhow::Result<Decision> {
+        // Write first, parse later: keep the full reply (it gets saved by the
+        // referee before any parse) and let the move be `None` if unrecognizable.
         let snapshot = push_user(&self.convo, round_user_message(view));
         let text = self.complete(&snapshot).await?;
-        let mv = parse_reply(&text)?;
         push_assistant(&self.convo, text.clone());
-        Ok(Decision { mv, note: Some(text) })
+        Ok(Decision { mv: Move::parse_decision(&text), note: Some(text) })
     }
 }
 
@@ -241,11 +236,12 @@ impl Player for GeminiPlayer {
     }
 
     async fn decide(&self, view: &PlayerView) -> anyhow::Result<Decision> {
+        // Write first, parse later: keep the full reply (it gets saved by the
+        // referee before any parse) and let the move be `None` if unrecognizable.
         let snapshot = push_user(&self.convo, round_user_message(view));
         let text = self.complete(&snapshot).await?;
-        let mv = parse_reply(&text)?;
         push_assistant(&self.convo, text.clone());
-        Ok(Decision { mv, note: Some(text) })
+        Ok(Decision { mv: Move::parse_decision(&text), note: Some(text) })
     }
 }
 
@@ -253,12 +249,6 @@ impl Player for GeminiPlayer {
 mod tests {
     use super::*;
     use crate::game::{MatchState, Round, Seat};
-
-    #[test]
-    fn parse_reply_takes_the_decision() {
-        let text = "Claude opened with rock, so I'll answer with paper.";
-        assert_eq!(parse_reply(text).unwrap(), Move::Paper);
-    }
 
     #[test]
     fn first_message_is_the_mediator_framing() {

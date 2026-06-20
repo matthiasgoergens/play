@@ -98,12 +98,8 @@ async fn stream(Query(p): Query<Params>) -> Sse<impl Stream<Item = Result<Event,
         let tx_round = tx.clone();
         let na = name_a.clone();
         let nb = name_b.clone();
-        let rec = recorder.clone();
 
-        let result = play_match(a.as_ref(), b.as_ref(), rounds, |r| {
-            if let Some(rec) = &rec {
-                let _ = rec.record(r);
-            }
+        let result = play_match(a.as_ref(), b.as_ref(), rounds, recorder.as_deref(), |r| {
             let outcome_b = match r.outcome_a {
                 Outcome::Win => Outcome::Loss,
                 Outcome::Loss => Outcome::Win,

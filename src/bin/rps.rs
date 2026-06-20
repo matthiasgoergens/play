@@ -58,7 +58,6 @@ async fn main() -> anyhow::Result<()> {
         Some(Arc::new(r))
     };
 
-    let rec = recorder.clone();
     let on_round = move |r: &RoundReport| {
         let verdict = match r.outcome_a {
             Outcome::Win => format!("{name_a} wins"),
@@ -75,14 +74,10 @@ async fn main() -> anyhow::Result<()> {
         if let Some(note) = &r.note_b {
             println!("            {name_b}: {note}");
         }
-        if let Some(rec) = &rec {
-            if let Err(e) = rec.record(r) {
-                eprintln!("warning: could not save round {}: {e}", r.number);
-            }
-        }
     };
 
-    let result = play_match(p1.as_ref(), p2.as_ref(), args.rounds, on_round).await;
+    let result =
+        play_match(p1.as_ref(), p2.as_ref(), args.rounds, recorder.as_deref(), on_round).await;
 
     let state = match result {
         Ok(state) => {

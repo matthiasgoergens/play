@@ -115,9 +115,11 @@ games/1718900000_anthropic-claude-opus-4-8_vs_gemini-2.5-flash/
 
 CLI flags: `--games-dir <path>` (default `games`), `--no-record` to skip.
 
-If a model ever replies without a recognizable move, the match **stops** there
-(no guessing). Whatever was played stays recorded and on screen — the viewer
-shows a "stopped" banner and keeps the rounds so far.
+Recording is **write-first, parse-later**: each model's raw reply is saved as
+soon as it arrives, *before* a move is parsed out of it. So if a model replies
+without a recognizable move, its reply file is still written — and only then
+does the match **stop** (no guessing). Whatever was played stays recorded and on
+screen; the viewer shows a "stopped" banner and keeps the rounds so far.
 
 ## Connecting agents — API keys, not OAuth
 

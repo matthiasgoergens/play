@@ -14,13 +14,17 @@ use crate::game::{Move, PlayerView};
 /// A move plus an optional note (trash talk / reasoning) for display.
 #[derive(Clone, Debug)]
 pub struct Decision {
-    pub mv: Move,
+    /// The chosen move, or `None` if the player produced output we couldn't
+    /// parse a move from. The raw output is still carried in `note` so it can
+    /// be saved before the move is resolved ("write first, parse later").
+    pub mv: Option<Move>,
     pub note: Option<String>,
 }
 
 impl Decision {
+    /// A definite move with no commentary (local players).
     pub fn new(mv: Move) -> Self {
-        Decision { mv, note: None }
+        Decision { mv: Some(mv), note: None }
     }
 }
 
@@ -135,7 +139,7 @@ impl Player for CounterPlayer {
             .map(|(i, _)| i)
             .unwrap()];
         Ok(Decision {
-            mv: predicted.loses_to(),
+            mv: Some(predicted.loses_to()),
             note: Some(format!("countering your frequent {predicted}")),
         })
     }
@@ -154,7 +158,7 @@ mod tests {
         let mut state = MatchState::new("counter", "fixed:rock", 10);
         for _ in 0..10 {
             let d = counter.decide(&state.view_for(Seat::A)).await.unwrap();
-            state.rounds.push(crate::game::Round { a: d.mv, b: Move::Rock });
+            state.rounds.push(crate::game::Round { a: d.mv.unwrap(), b: Move::Rock });
         }
         let (a, b, _d) = state.score();
         // After it has seen Rock a few times it should be playing Paper and winning.

@@ -1,5 +1,8 @@
-//! LLM-backed players. Each adapter turns the shared [`PlayerView`] into a
-//! prompt, calls a provider over HTTP, and parses a move back out.
+//! LLM-backed players. Each adapter holds its *own* running conversation, so a
+//! model's commentary builds across rounds — its developing read of the
+//! opponent is the whole point. Only moves are relayed between the two models
+//! (never each other's reasoning), so any psychoanalysis is inferred from play
+//! alone, exactly like the manual prototype.
 //!
 //! No official Anthropic/Google SDK exists for Rust, so these talk raw HTTP via
 //! `reqwest`. API keys are read from the environment; nothing is hard-coded.
@@ -7,77 +10,75 @@
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Mutex;
 
 use crate::game::{Move, Outcome, PlayerView};
 use crate::player::{Decision, Player};
 
-/// Shared instructions + rendered history. Both providers get the same text so
-/// matches stay comparable across backends.
-fn build_prompt(view: &PlayerView) -> String {
-    let mut s = String::new();
-    s.push_str(&format!(
-        "We are playing an iterated game of rock-paper-scissors.\n\
-         You are \"{me}\". Your opponent is \"{opp}\".\n\
-         This is round {round} of {total}. Moves are revealed simultaneously.\n\n",
-        me = view.my_name,
-        opp = view.opponent_name,
-        round = view.round_number,
-        total = view.total_rounds,
-    ));
+/// Deliberately light-touch framing: it tells each model the opponent is another
+/// AI and invites it to think out loud, but never instructs it to "analyze" or
+/// "win". The interesting behaviour emerges on its own.
+const SYSTEM: &str = "You're an AI language model playing an iterated game of \
+rock-paper-scissors against another AI language model. Think out loud as you \
+play — share whatever you're noticing or reasoning about. End every message \
+with your move on its own final line: just the single word rock, paper, or \
+scissors.";
 
-    if view.history.is_empty() {
-        s.push_str("No rounds have been played yet.\n\n");
-    } else {
-        s.push_str("History so far (most recent last):\n");
-        for (i, past) in view.history.iter().enumerate() {
-            let result = match past.outcome {
-                Outcome::Win => "you won",
-                Outcome::Loss => "you lost",
-                Outcome::Draw => "draw",
-            };
-            s.push_str(&format!(
-                "  round {n}: you played {mine}, opponent played {theirs} -> {result}\n",
-                n = i + 1,
-                mine = past.mine,
-                theirs = past.theirs,
-            ));
-        }
-        let (w, l, d) = tally(view);
-        s.push_str(&format!("\nScore so far: you {w}, opponent {l}, draws {d}.\n\n"));
-    }
-
-    s.push_str(
-        "Choose your move for this round. Reason briefly about the opponent's \
-         pattern if it helps, then end your reply with a final line of exactly \
-         one word: rock, paper, or scissors.",
-    );
-    s
+#[derive(Clone, Copy)]
+enum Role {
+    User,
+    Assistant,
 }
 
-fn tally(view: &PlayerView) -> (usize, usize, usize) {
-    let mut w = 0;
-    let mut l = 0;
-    let mut d = 0;
-    for p in &view.history {
-        match p.outcome {
-            Outcome::Win => w += 1,
-            Outcome::Loss => l += 1,
-            Outcome::Draw => d += 1,
+/// The per-round user message. The model remembers the rest of the match in its
+/// own conversation, so each turn only states the latest result.
+fn round_user_message(view: &PlayerView) -> String {
+    match view.history.last() {
+        None => format!(
+            "Let's play {n} rounds of rock-paper-scissors, head to head. Each round \
+             we both reveal at the same time. This is round 1 of {n}. Make your move.",
+            n = view.total_rounds
+        ),
+        Some(last) => {
+            let result = match last.outcome {
+                Outcome::Win => "you won",
+                Outcome::Loss => "you lost",
+                Outcome::Draw => "it was a draw",
+            };
+            format!(
+                "Round {prev} result: you threw {mine}, your opponent threw {theirs} \
+                 — {result}. On to round {cur} of {total}. Your move.",
+                prev = view.round_number - 1,
+                cur = view.round_number,
+                total = view.total_rounds,
+                mine = last.mine,
+                theirs = last.theirs,
+            )
         }
     }
-    (w, l, d)
 }
 
 /// Parse a move from free-form model text, preferring the last keyword (we ask
 /// the model to put its decision on the final line).
 fn parse_last_move(text: &str) -> anyhow::Result<Move> {
-    // Try the last non-empty line first, then fall back to the whole text.
     if let Some(line) = text.lines().rev().find(|l| !l.trim().is_empty()) {
         if let Some(mv) = Move::parse(line) {
             return Ok(mv);
         }
     }
     Move::parse(text).ok_or_else(|| anyhow!("could not find a move in model output: {text:?}"))
+}
+
+/// Push a user turn and return a snapshot of the whole conversation, without
+/// holding the lock across the network call.
+fn push_user(convo: &Mutex<Vec<(Role, String)>>, text: String) -> Vec<(Role, String)> {
+    let mut g = convo.lock().unwrap();
+    g.push((Role::User, text));
+    g.clone()
+}
+
+fn push_assistant(convo: &Mutex<Vec<(Role, String)>>, text: String) {
+    convo.lock().unwrap().push((Role::Assistant, text));
 }
 
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-opus-4-8";
@@ -89,6 +90,7 @@ pub struct AnthropicPlayer {
     model: String,
     api_key: String,
     client: reqwest::Client,
+    convo: Mutex<Vec<(Role, String)>>,
 }
 
 impl AnthropicPlayer {
@@ -102,22 +104,27 @@ impl AnthropicPlayer {
             model,
             api_key,
             client: reqwest::Client::new(),
+            convo: Mutex::new(Vec::new()),
         })
     }
-}
 
-#[async_trait]
-impl Player for AnthropicPlayer {
-    fn name(&self) -> &str {
-        &self.name
-    }
+    async fn complete(&self, convo: &[(Role, String)]) -> anyhow::Result<String> {
+        let messages: Vec<_> = convo
+            .iter()
+            .map(|(role, text)| {
+                let role = match role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                };
+                json!({ "role": role, "content": text })
+            })
+            .collect();
 
-    async fn decide(&self, view: &PlayerView) -> anyhow::Result<Decision> {
         let body = json!({
             "model": self.model,
-            "max_tokens": 512,
-            "system": "You are a competitive rock-paper-scissors player. Play to win.",
-            "messages": [{ "role": "user", "content": build_prompt(view) }],
+            "max_tokens": 1024,
+            "system": SYSTEM,
+            "messages": messages,
         });
 
         let resp = self
@@ -137,8 +144,7 @@ impl Player for AnthropicPlayer {
             return Err(anyhow!("Anthropic returned {status}: {value}"));
         }
 
-        // Concatenate all text blocks in the response content.
-        let text: String = value["content"]
+        Ok(value["content"]
             .as_array()
             .map(|blocks| {
                 blocks
@@ -148,13 +154,22 @@ impl Player for AnthropicPlayer {
                     .collect::<Vec<_>>()
                     .join("\n")
             })
-            .unwrap_or_default();
+            .unwrap_or_default())
+    }
+}
 
+#[async_trait]
+impl Player for AnthropicPlayer {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn decide(&self, view: &PlayerView) -> anyhow::Result<Decision> {
+        let snapshot = push_user(&self.convo, round_user_message(view));
+        let text = self.complete(&snapshot).await?;
         let mv = parse_last_move(&text)?;
-        Ok(Decision {
-            mv,
-            note: first_line(&text),
-        })
+        push_assistant(&self.convo, text.clone());
+        Ok(Decision { mv, note: Some(text) })
     }
 }
 
@@ -164,6 +179,7 @@ pub struct GeminiPlayer {
     model: String,
     api_key: String,
     client: reqwest::Client,
+    convo: Mutex<Vec<(Role, String)>>,
 }
 
 impl GeminiPlayer {
@@ -178,30 +194,30 @@ impl GeminiPlayer {
             model,
             api_key,
             client: reqwest::Client::new(),
+            convo: Mutex::new(Vec::new()),
         })
     }
-}
 
-#[async_trait]
-impl Player for GeminiPlayer {
-    fn name(&self) -> &str {
-        &self.name
-    }
+    async fn complete(&self, convo: &[(Role, String)]) -> anyhow::Result<String> {
+        let contents: Vec<_> = convo
+            .iter()
+            .map(|(role, text)| {
+                let role = match role {
+                    Role::User => "user",
+                    Role::Assistant => "model",
+                };
+                json!({ "role": role, "parts": [{ "text": text }] })
+            })
+            .collect();
 
-    async fn decide(&self, view: &PlayerView) -> anyhow::Result<Decision> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
             self.model
         );
         let body = json!({
-            "system_instruction": {
-                "parts": [{ "text": "You are a competitive rock-paper-scissors player. Play to win." }]
-            },
-            "contents": [{
-                "role": "user",
-                "parts": [{ "text": build_prompt(view) }]
-            }],
-            "generationConfig": { "maxOutputTokens": 512 }
+            "system_instruction": { "parts": [{ "text": SYSTEM }] },
+            "contents": contents,
+            "generationConfig": { "maxOutputTokens": 1024 }
         });
 
         let resp = self
@@ -220,7 +236,7 @@ impl Player for GeminiPlayer {
             return Err(anyhow!("Gemini returned {status}: {value}"));
         }
 
-        let text: String = value["candidates"][0]["content"]["parts"]
+        Ok(value["candidates"][0]["content"]["parts"]
             .as_array()
             .map(|parts| {
                 parts
@@ -229,22 +245,23 @@ impl Player for GeminiPlayer {
                     .collect::<Vec<_>>()
                     .join("\n")
             })
-            .unwrap_or_default();
-
-        let mv = parse_last_move(&text)?;
-        Ok(Decision {
-            mv,
-            note: first_line(&text),
-        })
+            .unwrap_or_default())
     }
 }
 
-/// The first non-empty line of model output, for display as a "note".
-fn first_line(text: &str) -> Option<String> {
-    text.lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(|l| l.to_string())
+#[async_trait]
+impl Player for GeminiPlayer {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn decide(&self, view: &PlayerView) -> anyhow::Result<Decision> {
+        let snapshot = push_user(&self.convo, round_user_message(view));
+        let text = self.complete(&snapshot).await?;
+        let mv = parse_last_move(&text)?;
+        push_assistant(&self.convo, text.clone());
+        Ok(Decision { mv, note: Some(text) })
+    }
 }
 
 #[cfg(test)]
@@ -259,12 +276,21 @@ mod tests {
     }
 
     #[test]
-    fn prompt_includes_history_and_score() {
+    fn first_round_message_is_an_invitation() {
+        let state = MatchState::new("me", "you", 5);
+        let msg = round_user_message(&state.view_for(Seat::A));
+        assert!(msg.contains("round 1 of 5"));
+        assert!(msg.contains("Make your move"));
+    }
+
+    #[test]
+    fn later_round_message_reports_last_result() {
         let mut state = MatchState::new("me", "you", 5);
         state.rounds.push(Round { a: Move::Rock, b: Move::Scissors });
-        let prompt = build_prompt(&state.view_for(Seat::A));
-        assert!(prompt.contains("round 2 of 5"));
-        assert!(prompt.contains("you won"));
-        assert!(prompt.contains("Score so far: you 1"));
+        let msg = round_user_message(&state.view_for(Seat::A));
+        assert!(msg.contains("you threw rock"));
+        assert!(msg.contains("opponent threw scissors"));
+        assert!(msg.contains("you won"));
+        assert!(msg.contains("round 2 of 5"));
     }
 }

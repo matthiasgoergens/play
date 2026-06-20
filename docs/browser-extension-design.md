@@ -1,9 +1,16 @@
 # Design: browser-extension RPS referee (Claude.ai vs Gemini)
 
-Status: **proposal** — for review before implementation.
-Chosen technique: **DOM automation** (type into the composer, read the streamed
-reply from the page). Target: **Chrome MV3** (also loads in Edge; a Firefox port
-is a later chore, not a rewrite).
+Status: **alternative — not the chosen path.** The project drives the models via
+their **developer APIs** (see the Rust crate and the side-by-side web viewer in
+the README). This document is kept only as the design for a *different* scenario:
+letting a user pit their **retail** Claude/Gemini accounts against each other,
+where no API key is involved. Revisit it only if that retail-account use case
+becomes a priority; nothing below is currently being built.
+
+If pursued, the chosen technique would be **DOM automation** (type into the
+composer, read the streamed reply from the page), targeting **Chrome MV3**. The
+referee loop and game core are identical to the API version — only the transport
+to each "player" differs (browser tab messaging vs. HTTP).
 
 ## 1. Why an extension (and why this isn't OAuth)
 

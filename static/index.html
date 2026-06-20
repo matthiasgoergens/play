@@ -61,6 +61,11 @@
   .reasoning { white-space: pre-wrap; color: #d2d6dd; }
   .reasoning.empty { color: var(--muted); font-style: italic; }
   .hint { padding: 24px 18px; color: var(--muted); }
+
+  .banner { padding: 10px 18px; font-size: 14px; border-bottom: 1px solid var(--line); }
+  .banner[hidden] { display: none; }
+  .banner.done { background: #1f2630; color: var(--ink); }
+  .banner.error { background: #3a2220; color: #f0c5c0; }
 </style>
 </head>
 <body>
@@ -72,6 +77,8 @@
     <button id="start">Start</button>
     <span id="status">idle</span>
   </header>
+
+  <div id="banner" class="banner" hidden></div>
 
   <div id="board">
     <section class="col a">
@@ -86,15 +93,24 @@
 
 <script>
   let es = null;
+  let saveDir = "";
   const $ = (id) => document.getElementById(id);
 
   function setStatus(t) { $("status").textContent = t; }
+
+  function showBanner(text, kind) {
+    const b = $("banner");
+    b.textContent = text;
+    b.className = "banner " + kind;
+    b.hidden = false;
+  }
 
   function clearFeeds() {
     $("feedA").innerHTML = "";
     $("feedB").innerHTML = "";
     $("scoreA").textContent = "";
     $("scoreB").textContent = "";
+    $("banner").hidden = true;
   }
 
   function appendCard(col, side, data) {
@@ -125,6 +141,7 @@
       case "start":
         $("nameA").textContent = msg.a;
         $("nameB").textContent = msg.b;
+        saveDir = msg.dir || "";
         setStatus(`playing ${msg.rounds} rounds…`);
         break;
       case "round":
@@ -134,16 +151,22 @@
         $("scoreB").textContent = `${msg.score.b} won`;
         setStatus(`round ${msg.round} done`);
         break;
-      case "done":
-        setStatus(`match complete · ${msg.score.a}–${msg.score.b} (${msg.score.draws} draws)`);
+      case "done": {
+        setStatus("match complete");
+        const saved = saveDir ? ` · saved to ${saveDir}` : "";
+        showBanner(`Match complete · ${msg.score.a}–${msg.score.b} (${msg.score.draws} draws)${saved}`, "done");
         if (es) es.close();
         $("start").disabled = false;
         break;
-      case "error":
-        setStatus("error: " + msg.message);
+      }
+      case "error": {
+        setStatus("stopped");
+        const saved = saveDir ? ` · partial game saved to ${saveDir}` : "";
+        showBanner("Match stopped: " + msg.message + saved, "error");
         if (es) es.close();
         $("start").disabled = false;
         break;
+      }
     }
   }
 

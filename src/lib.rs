@@ -13,6 +13,7 @@ pub mod agents;
 pub mod game;
 pub mod player;
 pub mod referee;
+pub mod transcript;
 
 use anyhow::{anyhow, Context};
 

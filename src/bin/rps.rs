@@ -1,9 +1,13 @@
 //! Command-line referee. Pits two players against each other over N rounds and
-//! prints the play-by-play and final score.
+//! prints the play-by-play and final score. Each game is also saved to disk.
+
+use std::path::Path;
+use std::sync::Arc;
 
 use clap::Parser;
 use rps::game::Outcome;
 use rps::referee::{play_match, RoundReport};
+use rps::transcript::Recorder;
 
 /// Iterated rock-paper-scissors between two agents.
 #[derive(Parser, Debug)]
@@ -24,6 +28,14 @@ struct Args {
     /// Seed for the local random/counter players (for reproducible matches).
     #[arg(long)]
     seed: Option<u64>,
+
+    /// Base directory for saved game transcripts.
+    #[arg(long, default_value = "games")]
+    games_dir: String,
+
+    /// Don't save a transcript for this match.
+    #[arg(long)]
+    no_record: bool,
 }
 
 #[tokio::main]
@@ -38,7 +50,16 @@ async fn main() -> anyhow::Result<()> {
     let name_a = p1.name().to_string();
     let name_b = p2.name().to_string();
 
-    let print_round = |r: &RoundReport| {
+    let recorder = if args.no_record {
+        None
+    } else {
+        let r = Recorder::create(Path::new(&args.games_dir), &name_a, &name_b)?;
+        println!("recording to {}\n", r.dir().display());
+        Some(Arc::new(r))
+    };
+
+    let rec = recorder.clone();
+    let on_round = move |r: &RoundReport| {
         let verdict = match r.outcome_a {
             Outcome::Win => format!("{name_a} wins"),
             Outcome::Loss => format!("{name_b} wins"),
@@ -54,9 +75,30 @@ async fn main() -> anyhow::Result<()> {
         if let Some(note) = &r.note_b {
             println!("            {name_b}: {note}");
         }
+        if let Some(rec) = &rec {
+            if let Err(e) = rec.record(r) {
+                eprintln!("warning: could not save round {}: {e}", r.number);
+            }
+        }
     };
 
-    let state = play_match(p1.as_ref(), p2.as_ref(), args.rounds, print_round).await?;
+    let result = play_match(p1.as_ref(), p2.as_ref(), args.rounds, on_round).await;
+
+    let state = match result {
+        Ok(state) => {
+            if let Some(rec) = &recorder {
+                let _ = rec.finish(None);
+            }
+            state
+        }
+        Err(e) => {
+            if let Some(rec) = &recorder {
+                let _ = rec.finish(Some(&format!("{e:#}")));
+                println!("\nsaved partial game to {}", rec.dir().display());
+            }
+            return Err(e);
+        }
+    };
 
     let (a, b, d) = state.score();
     println!("\nFinal score: {} {a} — {b} {} (draws: {d})", state.name_a, state.name_b);
@@ -68,6 +110,9 @@ async fn main() -> anyhow::Result<()> {
         "The match is a tie.".to_string()
     };
     println!("{winner}");
+    if let Some(rec) = &recorder {
+        println!("saved to {}", rec.dir().display());
+    }
 
     Ok(())
 }

@@ -1,6 +1,8 @@
 //! The referee: drives an iterated match, asking both players for a move each
 //! round, recording the result, and emitting events for display.
 
+use anyhow::Context;
+
 use crate::game::{MatchState, Move, Outcome, Round, Seat};
 use crate::player::Player;
 
@@ -31,9 +33,15 @@ pub async fn play_match(
         let view_b = state.view_for(Seat::B);
 
         // Throws are simultaneous: query both before either result is known.
+        // If either player can't produce a move, the match stops here; rounds
+        // already played remain recorded and displayed.
         let (da, db) = tokio::join!(player_a.decide(&view_a), player_b.decide(&view_b));
-        let da = da?;
-        let db = db?;
+        let da = da.with_context(|| {
+            format!("{} couldn't make a move in round {n} — match stopped", player_a.name())
+        })?;
+        let db = db.with_context(|| {
+            format!("{} couldn't make a move in round {n} — match stopped", player_b.name())
+        })?;
 
         let round = Round { a: da.mv, b: db.mv };
         let report = RoundReport {

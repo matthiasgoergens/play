@@ -6,6 +6,8 @@
 //! `GET /stream`  -> SSE; query params: rounds, p1, p2 (player specs).
 
 use std::convert::Infallible;
+use std::path::Path;
+use std::sync::Arc;
 
 use axum::{
     extract::Query,
@@ -22,6 +24,7 @@ use tokio_stream::{wrappers::UnboundedReceiverStream, Stream, StreamExt};
 
 use rps::game::Outcome;
 use rps::referee::play_match;
+use rps::transcript::Recorder;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -77,16 +80,30 @@ async fn stream(Query(p): Query<Params>) -> Sse<impl Stream<Item = Result<Event,
 
         let name_a = a.name().to_string();
         let name_b = b.name().to_string();
+
+        let recorder = Recorder::create(Path::new("games"), &name_a, &name_b)
+            .map(Arc::new)
+            .ok();
+        let dir = recorder
+            .as_ref()
+            .map(|r| r.dir().display().to_string())
+            .unwrap_or_default();
+
         let _ = tx.send(
-            json!({ "type": "start", "a": name_a, "b": name_b, "rounds": rounds }).to_string(),
+            json!({ "type": "start", "a": name_a, "b": name_b, "rounds": rounds, "dir": dir })
+                .to_string(),
         );
 
         let mut score = (0usize, 0usize, 0usize); // wins_a, wins_b, draws
         let tx_round = tx.clone();
         let na = name_a.clone();
         let nb = name_b.clone();
+        let rec = recorder.clone();
 
         let result = play_match(a.as_ref(), b.as_ref(), rounds, |r| {
+            if let Some(rec) = &rec {
+                let _ = rec.record(r);
+            }
             let outcome_b = match r.outcome_a {
                 Outcome::Win => Outcome::Loss,
                 Outcome::Loss => Outcome::Win,
@@ -120,6 +137,9 @@ async fn stream(Query(p): Query<Params>) -> Sse<impl Stream<Item = Result<Event,
 
         match result {
             Ok(_) => {
+                if let Some(rec) = &recorder {
+                    let _ = rec.finish(None);
+                }
                 let _ = tx.send(
                     json!({ "type": "done",
                             "score": { "a": score.0, "b": score.1, "draws": score.2 } })
@@ -127,6 +147,9 @@ async fn stream(Query(p): Query<Params>) -> Sse<impl Stream<Item = Result<Event,
                 );
             }
             Err(e) => {
+                if let Some(rec) = &recorder {
+                    let _ = rec.finish(Some(&format!("{e:#}")));
+                }
                 let _ = tx.send(
                     json!({ "type": "error", "message": format!("{e:#}") }).to_string(),
                 );

@@ -88,12 +88,34 @@ smoke test of the plumbing.
 - `src/player.rs` — the `Player` trait and the local players.
 - `src/agents.rs` — the Claude and Gemini adapters (raw HTTP via `reqwest`).
 - `src/referee.rs` — drives the match, querying both players concurrently each round.
+- `src/transcript.rs` — saves each game to disk.
 - `src/bin/rps.rs` — the CLI driver.
 - `src/bin/serve.rs` + `static/index.html` — the side-by-side web viewer (SSE).
 
 `Player` is the only seam that matters: anything that can produce a move from a
 history is a contestant. `cargo test` covers the rules, parsing, and a
 deterministic `counter`-vs-`fixed` match.
+
+## Saved games
+
+Every match is saved for posterity (both the CLI and the viewer do this). Each
+game gets its own directory under `games/`, with **one text file per move** —
+the filename says when/who/what, the body is that model's full reply:
+
+```
+games/1718900000_anthropic-claude-opus-4-8_vs_gemini-2.5-flash/
+  r001_A_anthropic-claude-opus-4-8_rock.txt     # body = Claude's round-1 message
+  r001_B_gemini-2.5-flash_paper.txt             # body = Gemini's round-1 message
+  r002_A_anthropic-claude-opus-4-8_scissors.txt
+  ...
+  summary.txt                                   # move table + final score
+```
+
+CLI flags: `--games-dir <path>` (default `games`), `--no-record` to skip.
+
+If a model ever replies without a recognizable move, the match **stops** there
+(no guessing). Whatever was played stays recorded and on screen — the viewer
+shows a "stopped" banner and keeps the rounds so far.
 
 ## Connecting agents — API keys, not OAuth
 
